@@ -6,7 +6,7 @@
 <title>Imzo qo'yish</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: var(--tg-theme-bg-color, #fff);
@@ -14,6 +14,7 @@
     padding: 12px;
     min-height: 100vh;
     user-select: none;
+    overscroll-behavior: none;
   }
   h2 { font-size: 18px; margin-bottom: 8px; color: var(--tg-theme-hint-color, #555); }
   .info {
@@ -26,7 +27,7 @@
     background: #fff; position: relative; margin-bottom: 12px;
     touch-action: none;
   }
-  #sigCanvas { width: 100%; height: 260px; display: block; cursor: crosshair; }
+  #sigCanvas { width: 100%; height: 280px; display: block; cursor: crosshair; touch-action: none; }
   .hint { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
          color: #bbb; font-size: 14px; pointer-events: none; }
   .buttons { display: flex; gap: 8px; flex-direction: column; }
@@ -34,11 +35,16 @@
     padding: 14px; font-size: 16px; border: none; border-radius: 10px;
     cursor: pointer; font-weight: 600; transition: opacity 0.2s;
   }
-  .btn-save { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
-  .btn-clear { background: #f44336; color: #fff; }
-  .btn-cancel { background: #888; color: #fff; }
+  .btn-save { background: #28a745; color: #fff; }
+  .btn-clear { background: #dc3545; color: #fff; }
+  .btn-cancel { background: #6c757d; color: #fff; }
   button:active { opacity: 0.7; }
   button:disabled { opacity: 0.5; }
+  #status { padding: 10px; margin-top: 8px; border-radius: 8px;
+            text-align: center; font-size: 14px; display: none; }
+  #status.show { display: block; }
+  #status.success { background: #d4edda; color: #155724; }
+  #status.error { background: #f8d7da; color: #721c24; }
 </style>
 </head>
 <body>
@@ -61,21 +67,36 @@
   <button class="btn-cancel" id="btnCancel">❌ Bekor qilish</button>
 </div>
 
-<script>
-const tg = window.Telegram.WebApp;
-tg.ready();
-tg.expand();
+<div id="status"></div>
 
-// URL dan ma'lumot olish
+<script>
+let tg = null;
+try {
+  tg = window.Telegram.WebApp;
+  tg.ready();
+  tg.expand();
+  tg.disableVerticalSwipes && tg.disableVerticalSwipes();
+} catch(e) {
+  console.error('Telegram WebApp init xato:', e);
+}
+
 const params = new URLSearchParams(window.location.search);
-document.getElementById('orgName').textContent = params.get('name') || 'Tashkilot';
+document.getElementById('orgName').textContent = decodeURIComponent(params.get('name') || 'Tashkilot');
 document.getElementById('orgInn').textContent  = params.get('inn')  || '-';
 document.getElementById('dateTime').textContent = new Date().toLocaleString('uz-UZ');
 
-// Canvas sozlash
 const canvas = document.getElementById('sigCanvas');
 const hint   = document.getElementById('hint');
 const ctx    = canvas.getContext('2d');
+const status = document.getElementById('status');
+
+function showStatus(text, type) {
+  status.textContent = text;
+  status.className = 'show ' + type;
+  if (type === 'success') {
+    setTimeout(() => { status.className = ''; }, 3000);
+  }
+}
 
 function resizeCanvas() {
   const rect = canvas.getBoundingClientRect();
@@ -87,12 +108,10 @@ function resizeCanvas() {
   ctx.lineWidth   = 3;
   ctx.lineCap     = 'round';
   ctx.lineJoin    = 'round';
-  // Oq fon
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, rect.width, rect.height);
 }
 resizeCanvas();
-window.addEventListener('resize', resizeCanvas);
 
 let drawing = false;
 let hasDrawn = false;
@@ -137,34 +156,79 @@ canvas.addEventListener('touchstart',start, {passive: false});
 canvas.addEventListener('touchmove', move,  {passive: false});
 canvas.addEventListener('touchend',  end);
 
-// Tozalash
 document.getElementById('btnClear').onclick = () => {
   const rect = canvas.getBoundingClientRect();
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, rect.width, rect.height);
   hasDrawn = false;
   hint.style.display = 'block';
+  showStatus('🗑 Tozalandi', 'success');
 };
 
-// Saqlash
 document.getElementById('btnSave').onclick = () => {
   if (!hasDrawn) {
-    tg.showAlert('Iltimos, avval imzo chizing!');
+    showStatus('⚠️ Avval imzo chizing!', 'error');
     return;
   }
-  const dataURL = canvas.toDataURL('image/png');
-  tg.sendData(JSON.stringify({
-    type: 'signature',
-    inn:  params.get('inn') || '',
-    data: dataURL,
-    timestamp: new Date().toISOString()
-  }));
-  tg.close();
+  if (!tg) {
+    showStatus('❌ Telegram WebApp aniqlanmadi', 'error');
+    return;
+  }
+
+  try {
+    showStatus('💾 Saqlanmoqda...', 'success');
+
+    // Compress qilish — JPEG sifatida (PNG dan ko'p marta kichik)
+    const dataURL = canvas.toDataURL('image/jpeg', 0.6);
+
+    // Hajmni tekshirish — Telegram limit 4096 bayt bor
+    const sizeKB = Math.round(dataURL.length / 1024);
+    console.log('Data hajmi:', sizeKB, 'KB');
+
+    if (dataURL.length > 4000) {
+      // Juda katta — kichraytirish kerak
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = 300;
+      tempCanvas.height = 150;
+      const tctx = tempCanvas.getContext('2d');
+      tctx.fillStyle = '#fff';
+      tctx.fillRect(0, 0, 300, 150);
+      tctx.drawImage(canvas, 0, 0, 300, 150);
+      const smallURL = tempCanvas.toDataURL('image/jpeg', 0.5);
+      console.log('Kichraytirilgan hajmi:', Math.round(smallURL.length/1024), 'KB');
+
+      const payload = JSON.stringify({
+        t: 'sig',
+        i: params.get('inn') || '',
+        d: smallURL
+      });
+
+      if (payload.length > 4000) {
+        showStatus('❌ Imzo juda katta — qisqaroq chizing', 'error');
+        return;
+      }
+      tg.sendData(payload);
+    } else {
+      const payload = JSON.stringify({
+        t: 'sig',
+        i: params.get('inn') || '',
+        d: dataURL
+      });
+      tg.sendData(payload);
+    }
+
+    showStatus('✅ Yuborildi! Oyna yopilmoqda...', 'success');
+    setTimeout(() => { tg.close(); }, 800);
+  } catch (e) {
+    console.error('Saqlash xato:', e);
+    showStatus('❌ Xato: ' + e.message, 'error');
+  }
 };
 
-// Bekor qilish
 document.getElementById('btnCancel').onclick = () => {
-  tg.close();
+  if (tg) {
+    tg.close();
+  }
 };
 </script>
 </body>
