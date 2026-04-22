@@ -45,6 +45,7 @@
   #status.show { display: block; }
   #status.success { background: #d4edda; color: #155724; }
   #status.error { background: #f8d7da; color: #721c24; }
+  #status.info { background: #d1ecf1; color: #0c5460; }
 </style>
 </head>
 <body>
@@ -75,7 +76,6 @@ try {
   tg = window.Telegram.WebApp;
   tg.ready();
   tg.expand();
-  tg.disableVerticalSwipes && tg.disableVerticalSwipes();
 } catch(e) {
   console.error('Telegram WebApp init xato:', e);
 }
@@ -125,28 +125,10 @@ function getPos(e) {
   };
 }
 
-function start(e) {
-  e.preventDefault();
-  drawing = true;
-  hasDrawn = true;
-  hint.style.display = 'none';
-  const p = getPos(e);
-  ctx.beginPath();
-  ctx.moveTo(p.x, p.y);
-}
-
-function move(e) {
-  if (!drawing) return;
-  e.preventDefault();
-  const p = getPos(e);
-  ctx.lineTo(p.x, p.y);
-  ctx.stroke();
-}
-
-function end(e) {
-  e && e.preventDefault && e.preventDefault();
-  drawing = false;
-}
+function start(e) { e.preventDefault(); drawing = true; hasDrawn = true; hint.style.display = 'none';
+                    const p = getPos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); }
+function move(e)  { if (!drawing) return; e.preventDefault(); const p = getPos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); }
+function end(e)   { e && e.preventDefault && e.preventDefault(); drawing = false; }
 
 canvas.addEventListener('mousedown', start);
 canvas.addEventListener('mousemove', move);
@@ -165,6 +147,38 @@ document.getElementById('btnClear').onclick = () => {
   showStatus('🗑 Tozalandi', 'success');
 };
 
+// Imzoni kichraytirib JPEG ga aylantirish
+function compressSignature(maxBytes = 3500) {
+  // Bir nechta o'lchamda urinib ko'ramiz
+  const sizes = [
+    [400, 200, 0.7],
+    [350, 175, 0.6],
+    [300, 150, 0.5],
+    [250, 125, 0.45],
+    [200, 100, 0.4],
+    [180, 90, 0.35],
+    [150, 75, 0.3],
+  ];
+
+  for (const [w, h, q] of sizes) {
+    const tmp = document.createElement('canvas');
+    tmp.width = w; tmp.height = h;
+    const tctx = tmp.getContext('2d');
+    tctx.fillStyle = '#fff';
+    tctx.fillRect(0, 0, w, h);
+    tctx.drawImage(canvas, 0, 0, w, h);
+
+    const dataURL = tmp.toDataURL('image/jpeg', q);
+    // JSON ichidagi hajm
+    const jsonSize = JSON.stringify({t:'sig', i: params.get('inn') || '', d: dataURL}).length;
+    console.log(`O'lcham ${w}x${h} q=${q} → JSON: ${jsonSize} bayt`);
+    if (jsonSize < maxBytes) {
+      return { dataURL, w, h, q, size: jsonSize };
+    }
+  }
+  return null;
+}
+
 document.getElementById('btnSave').onclick = () => {
   if (!hasDrawn) {
     showStatus('⚠️ Avval imzo chizing!', 'error');
@@ -176,49 +190,26 @@ document.getElementById('btnSave').onclick = () => {
   }
 
   try {
-    showStatus('💾 Saqlanmoqda...', 'success');
+    showStatus('💾 Saqlanmoqda...', 'info');
 
-    // Compress qilish — JPEG sifatida (PNG dan ko'p marta kichik)
-    const dataURL = canvas.toDataURL('image/jpeg', 0.6);
-
-    // Hajmni tekshirish — Telegram limit 4096 bayt bor
-    const sizeKB = Math.round(dataURL.length / 1024);
-    console.log('Data hajmi:', sizeKB, 'KB');
-
-    if (dataURL.length > 4000) {
-      // Juda katta — kichraytirish kerak
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = 300;
-      tempCanvas.height = 150;
-      const tctx = tempCanvas.getContext('2d');
-      tctx.fillStyle = '#fff';
-      tctx.fillRect(0, 0, 300, 150);
-      tctx.drawImage(canvas, 0, 0, 300, 150);
-      const smallURL = tempCanvas.toDataURL('image/jpeg', 0.5);
-      console.log('Kichraytirilgan hajmi:', Math.round(smallURL.length/1024), 'KB');
-
-      const payload = JSON.stringify({
-        t: 'sig',
-        i: params.get('inn') || '',
-        d: smallURL
-      });
-
-      if (payload.length > 4000) {
-        showStatus('❌ Imzo juda katta — qisqaroq chizing', 'error');
-        return;
-      }
-      tg.sendData(payload);
-    } else {
-      const payload = JSON.stringify({
-        t: 'sig',
-        i: params.get('inn') || '',
-        d: dataURL
-      });
-      tg.sendData(payload);
+    const compressed = compressSignature();
+    if (!compressed) {
+      showStatus('❌ Imzo juda murakkab. Kichraytirib qaytadan chizing.', 'error');
+      return;
     }
 
-    showStatus('✅ Yuborildi! Oyna yopilmoqda...', 'success');
-    setTimeout(() => { tg.close(); }, 800);
+    console.log(`Final: ${compressed.w}x${compressed.h} q=${compressed.q} → ${compressed.size} bayt`);
+
+    const payload = JSON.stringify({
+      t: 'sig',
+      i: params.get('inn') || '',
+      d: compressed.dataURL
+    });
+
+    tg.sendData(payload);
+
+    showStatus(`✅ Yuborildi! (${compressed.size} bayt)`, 'success');
+    setTimeout(() => { try { tg.close(); } catch(e){} }, 600);
   } catch (e) {
     console.error('Saqlash xato:', e);
     showStatus('❌ Xato: ' + e.message, 'error');
@@ -226,9 +217,7 @@ document.getElementById('btnSave').onclick = () => {
 };
 
 document.getElementById('btnCancel').onclick = () => {
-  if (tg) {
-    tg.close();
-  }
+  if (tg) { try { tg.close(); } catch(e){} }
 };
 </script>
 </body>
